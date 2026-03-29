@@ -4,6 +4,9 @@ local farm_kb = nil
 local circle_angle = 0
 local current_hrp = nil
 local mouse = lp:GetMouse()
+local safe_mode = false
+
+local SAFE_POS = Vector3.new(73.86, -39.79, 2470.36)
 
 UI.AddTab("Auto Farm", function(tab)
     local farm_sec = tab:Section("Farm", "Left")
@@ -20,6 +23,10 @@ UI.AddTab("Auto Farm", function(tab)
     farm_sec:SliderInt("circle_radius", "Circle Radius", 1, 20, 6)
     farm_sec:SliderInt("circle_step", "Circle Step", 1, 90, 30)
 
+    local safe_sec = tab:Section("Safe Spot", "Left")
+    safe_sec:SliderInt("escape_hp", "Escape Below HP", 1, 100, 30)
+    safe_sec:SliderInt("resume_hp", "Resume Above HP", 1, 100, 60)
+
     local info_sec = tab:Section("Info", "Right")
     info_sec:Text("Left-click keybind to rebind")
     info_sec:Text("Right-click to change mode")
@@ -28,6 +35,8 @@ UI.AddTab("Auto Farm", function(tab)
     info_sec:Text("Circle Radius: orbit distance")
     info_sec:Text("Circle Step: degrees per move")
     info_sec:Text("Skip Timeout: seconds before next target")
+    info_sec:Text("Escape HP: stop farming below this")
+    info_sec:Text("Resume HP: start farming above this")
 end)
 
 local resolvers = {
@@ -82,7 +91,7 @@ local function tween_to(local_player, target, speed, easing_style)
         local elapsed = 0
         local dt = 1 / 240
         while elapsed < duration do
-            if not farming then
+            if not farming or safe_mode then
                 result.completed = true
                 return
             end
@@ -141,11 +150,17 @@ local function check_for_equip()
     local char = lp.Character
     if not char then return false end
     for _, v in ipairs(char:GetChildren()) do
-        if v.ClassName == "Tool" then
-            return true
-        end
+        if v.ClassName == "Tool" then return true end
     end
     return false
+end
+
+local function get_player_health()
+    local char = lp.Character
+    if not char then return 100 end
+    local hum = char:FindFirstChildWhichIsA("Humanoid")
+    if not hum then return 100 end
+    return hum.Health
 end
 
 local function get_sorted_targets()
@@ -189,6 +204,7 @@ task.spawn(function()
                 else
                     mouse1release()
                     current_hrp = nil
+                    safe_mode = false
                     notify("Farm stopped", "Farm", 2)
                 end
             end
@@ -197,10 +213,45 @@ task.spawn(function()
     end
 end)
 
+-- SAFE SPOT LOOP
+task.spawn(function()
+    while true do
+        if farming then
+            local health        = get_player_health()
+            local escape_thresh = UI.GetValue("escape_hp")
+            local resume_thresh = UI.GetValue("resume_hp")
+
+            if escape_thresh and resume_thresh then
+                if not safe_mode and health < escape_thresh then
+                    safe_mode   = true
+                    current_hrp = nil
+                    mouse1release()
+                    notify("Low HP! Going to safe spot.", "Farm", 2)
+                end
+
+                if safe_mode then
+                    local char = lp.Character
+                    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        hrp.Position = SAFE_POS
+                        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    end
+
+                    if health >= resume_thresh then
+                        safe_mode = false
+                        notify("HP recovered! Resuming farm.", "Farm", 2)
+                    end
+                end
+            end
+        end
+        task.wait(0.1)
+    end
+end)
+
 -- EQUIP LOOP
 task.spawn(function()
     while true do
-        if farming and not check_for_equip() then
+        if farming and not safe_mode and not check_for_equip() then
             keypress(0x31)
             task.wait(0.1)
             keyrelease(0x31)
@@ -212,7 +263,7 @@ end)
 -- CAMERA AIM LOOP
 task.spawn(function()
     while true do
-        if farming and current_hrp then
+        if farming and not safe_mode and current_hrp then
             camera_look_at_target(current_hrp)
         end
         task.wait(0.01)
@@ -222,7 +273,7 @@ end)
 -- HOLD CLICK LOOP
 task.spawn(function()
     while true do
-        if farming and UI.GetValue("auto_click") then
+        if farming and not safe_mode and UI.GetValue("auto_click") then
             mouse1press()
         else
             mouse1release()
@@ -236,7 +287,7 @@ task.spawn(function()
     local target_index = 1
 
     while true do
-        if not farming then
+        if not farming or safe_mode then
             task.wait(0.1)
             continue
         end
@@ -287,7 +338,7 @@ task.spawn(function()
             task.wait()
         end
 
-        if not farming then task.wait() continue end
+        if not farming or safe_mode then task.wait() continue end
 
         local timer       = 0
         local switched    = false
@@ -295,9 +346,9 @@ task.spawn(function()
 
         -- TIMER LOOP
         task.spawn(function()
-            while farming and not switched do
+            while farming and not switched and not safe_mode do
                 task.wait(1)
-                if not farming or switched then break end
+                if not farming or switched or safe_mode then break end
 
                 local current_health = humanoid.Health
 
@@ -330,7 +381,7 @@ task.spawn(function()
         end)
 
         -- ORBIT LOOP
-        while farming and not switched do
+        while farming and not switched and not safe_mode do
             if not nearest_hrp or not nearest_hrp.Parent then
                 target_index = 1
                 current_hrp  = nil
@@ -370,7 +421,7 @@ task.spawn(function()
                 "ease_in_quad"
             )
 
-            while not signal.completed and not switched do
+            while not signal.completed and not switched and not safe_mode do
                 local h = nearest:FindFirstChildWhichIsA("Humanoid")
                 if not h or h.Health < 1 then
                     target_index = 1
